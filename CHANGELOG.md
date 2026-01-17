@@ -30,6 +30,7 @@
 
 ### Fixes
 - Sub-agents: route announce delivery through the correct channel account IDs. (#1061, #1058) — thanks @adam91holt.
+- Telegram: split long media captions into follow-up text messages in bot delivery. (#1063) — thanks @mukhtharcm.
 - Repo: fix oxlint config filename and move ignore pattern into config. (#1064) — thanks @connorshea.
 - Messages: `/stop` now hard-aborts queued followups and sub-agent runs; suppress zero-count stop notes.
 - Sessions: reset `compactionCount` on `/new` and `/reset`, and preserve `sessions.json` file mode (0600).

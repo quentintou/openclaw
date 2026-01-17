@@ -73,6 +73,7 @@ export async function deliverReplies(params: {
     // (when caption exceeds Telegram's 1024-char limit)
     let pendingFollowUpText: string | undefined;
     for (const mediaUrl of mediaList) {
+      const isFirstMedia = first;
       const media = await loadWebMedia(mediaUrl);
       const kind = mediaKindFromMime(media.contentType ?? undefined);
       const isGif = isGifMedia({
@@ -82,11 +83,12 @@ export async function deliverReplies(params: {
       const fileName = media.fileName ?? (isGif ? "animation.gif" : "file");
       const file = new InputFile(media.buffer, fileName);
       // Caption only on first item; if text exceeds limit, defer to follow-up message.
-      const rawCaption = first ? (reply.text ?? undefined) : undefined;
-      const captionTooLong = rawCaption != null && rawCaption.length > TELEGRAM_MAX_CAPTION_LENGTH;
-      const caption = captionTooLong ? undefined : rawCaption;
-      if (captionTooLong && rawCaption) {
-        pendingFollowUpText = rawCaption;
+      const rawCaption = isFirstMedia ? (reply.text ?? undefined) : undefined;
+      const trimmedCaption = rawCaption?.trim() ?? "";
+      const captionTooLong = trimmedCaption.length > TELEGRAM_MAX_CAPTION_LENGTH;
+      const caption = captionTooLong ? undefined : trimmedCaption || undefined;
+      if (captionTooLong && trimmedCaption) {
+        pendingFollowUpText = trimmedCaption;
       }
       first = false;
       const replyToMessageId =
@@ -138,22 +140,26 @@ export async function deliverReplies(params: {
       if (replyToId && !hasReplied) {
         hasReplied = true;
       }
-    }
-    // Send deferred follow-up text when caption was too long for media.
-    // Chunk it in case it's extremely long (same logic as text-only replies).
-    if (pendingFollowUpText) {
-      const chunks = markdownToTelegramChunks(pendingFollowUpText, textLimit);
-      for (const chunk of chunks) {
-        await sendTelegramText(bot, chatId, chunk.html, runtime, {
-          replyToMessageId:
-            replyToId && (replyToMode === "all" || !hasReplied) ? replyToId : undefined,
-          messageThreadId,
-          textMode: "html",
-          plainText: chunk.text,
-        });
-        if (replyToId && !hasReplied) {
-          hasReplied = true;
+      // Send deferred follow-up text right after the first media item.
+      // Chunk it in case it's extremely long (same logic as text-only replies).
+      if (pendingFollowUpText && isFirstMedia) {
+        const chunks = markdownToTelegramChunks(pendingFollowUpText, textLimit);
+        for (const chunk of chunks) {
+          const replyToMessageIdFollowup =
+            replyToId && (replyToMode === "all" || !hasReplied) ? replyToId : undefined;
+          const textParams: Record<string, unknown> = {};
+          if (replyToMessageIdFollowup) {
+            textParams.reply_to_message_id = replyToMessageIdFollowup;
+          }
+          if (threadParams) {
+            textParams.message_thread_id = threadParams.message_thread_id;
+          }
+          await bot.api.sendMessage(chatId, chunk.text, textParams);
+          if (replyToId && !hasReplied) {
+            hasReplied = true;
+          }
         }
+        pendingFollowUpText = undefined;
       }
     }
   }
