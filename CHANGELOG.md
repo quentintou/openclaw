@@ -43,6 +43,7 @@ Docs: https://docs.clawd.bot
 - Messaging: keep newline chunking safe for fenced markdown blocks across channels.
 - Tests: cap Vitest workers on CI macOS to reduce timeouts.
 - Tests: avoid fake-timer dependency in embedded runner stream mock to reduce CI flakes.
+- Tests: increase embedded runner ordering test timeout to reduce CI flakes.
 
 ## 2026.1.23-1
 

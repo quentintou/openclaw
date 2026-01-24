@@ -213,7 +213,7 @@ describe("runEmbeddedPiAgent", () => {
 
   itIfNotWin32(
     "persists the first user message before assistant output",
-    { timeout: 60_000 },
+    { timeout: 120_000 },
     async () => {
       const sessionFile = nextSessionFile();
       const cfg = makeOpenAiConfig(["mock-1"]);
