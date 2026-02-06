@@ -6,8 +6,7 @@ import type { EffectiveContextPruningSettings } from "./settings.js";
 import { makeToolPrunablePredicate } from "./tools.js";
 
 const CHARS_PER_TOKEN_ESTIMATE = 4;
-// We currently skip pruning tool results that contain images. Still, we count them (approx.) so
-// we start trimming prunable tool results earlier when image-heavy context is consuming the window.
+// Approximate char cost of an inline image for context-size estimation.
 const IMAGE_CHAR_ESTIMATE = 8_000;
 
 function asText(text: string): TextContent {
@@ -81,6 +80,24 @@ function hasImageBlocks(content: ReadonlyArray<TextContent | ImageContent>): boo
     if (block.type === "image") return true;
   }
   return false;
+}
+
+function stripImageBlocks(
+  content: ReadonlyArray<TextContent | ImageContent>,
+): (TextContent | ImageContent)[] {
+  const result: (TextContent | ImageContent)[] = [];
+  let strippedCount = 0;
+  for (const block of content) {
+    if (block.type === "image") {
+      strippedCount++;
+    } else {
+      result.push(block);
+    }
+  }
+  if (strippedCount > 0) {
+    result.push(asText(`[${strippedCount} image${strippedCount > 1 ? "s" : ""} pruned from context]`));
+  }
+  return result;
 }
 
 function estimateMessageChars(message: AgentMessage): number {
@@ -157,16 +174,28 @@ function softTrimToolResultMessage(params: {
   settings: EffectiveContextPruningSettings;
 }): ToolResultMessage | null {
   const { msg, settings } = params;
-  // Ignore image tool results for now: these are often directly relevant and hard to partially prune safely.
-  if (hasImageBlocks(msg.content)) return null;
 
-  const parts = collectTextSegments(msg.content);
+  // Strip image blocks first — base64 images accumulate and are never reclaimed by the LLM
+  // cache, so we replace them with a short text note to free context space.
+  let content = msg.content;
+  let didStripImages = false;
+  if (hasImageBlocks(content)) {
+    content = stripImageBlocks(content) as typeof content;
+    didStripImages = true;
+  }
+
+  const parts = collectTextSegments(content);
   const rawLen = estimateJoinedTextLength(parts);
-  if (rawLen <= settings.softTrim.maxChars) return null;
+  if (rawLen <= settings.softTrim.maxChars) {
+    // Text is small enough — but if we stripped images, return the updated message.
+    return didStripImages ? { ...msg, content } : null;
+  }
 
   const headChars = Math.max(0, settings.softTrim.headChars);
   const tailChars = Math.max(0, settings.softTrim.tailChars);
-  if (headChars + tailChars >= rawLen) return null;
+  if (headChars + tailChars >= rawLen) {
+    return didStripImages ? { ...msg, content } : null;
+  }
 
   const head = takeHeadFromJoinedText(parts, headChars);
   const tail = takeTailFromJoinedText(parts, tailChars);
@@ -225,9 +254,6 @@ export function pruneContextMessages(params: {
     const msg = messages[i];
     if (!msg || msg.role !== "toolResult") continue;
     if (!isToolPrunable(msg.toolName)) continue;
-    if (hasImageBlocks(msg.content)) {
-      continue;
-    }
     prunableToolIndexes.push(i);
 
     const updated = softTrimToolResultMessage({

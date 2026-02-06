@@ -409,7 +409,7 @@ describe("context-pruning", () => {
     expect(toolText(findToolResult(next, "t2"))).toContain("y".repeat(20_000));
   });
 
-  it("skips tool results that contain images (no soft trim, no hard clear)", () => {
+  it("strips image blocks and prunes text in tool results with images", () => {
     const messages: AgentMessage[] = [
       makeUser("u1"),
       makeImageToolResult({
@@ -438,8 +438,51 @@ describe("context-pruning", () => {
     if (!tool || tool.role !== "toolResult") {
       throw new Error("unexpected pruned message list shape");
     }
-    expect(tool.content.some((b) => b.type === "image")).toBe(true);
-    expect(toolText(tool)).toContain("x".repeat(20_000));
+    // Image blocks should be stripped
+    expect(tool.content.some((b) => b.type === "image")).toBe(false);
+    // Text should be hard-cleared (ratio 0.0 triggers it)
+    expect(toolText(tool)).toBe("[cleared]");
+  });
+
+  it("strips images but preserves short text in tool results", () => {
+    const messages: AgentMessage[] = [
+      makeUser("u1"),
+      makeImageToolResult({
+        toolCallId: "t1",
+        toolName: "exec",
+        text: "short result",
+      }),
+    ];
+
+    const settings = {
+      ...DEFAULT_CONTEXT_PRUNING_SETTINGS,
+      keepLastAssistants: 0,
+      softTrimRatio: 0.0,
+      hardClearRatio: 10.0, // high threshold so hard-clear doesn't kick in
+      minPrunableToolChars: 0,
+      softTrim: { maxChars: 4_000, headChars: 1_500, tailChars: 1_500 },
+    };
+
+    const ctx = {
+      model: { contextWindow: 1000 },
+    } as unknown as ExtensionContext;
+    const next = pruneContextMessages({ messages, settings, ctx });
+
+    const tool = findToolResult(next, "t1");
+    if (!tool || tool.role !== "toolResult") {
+      throw new Error("unexpected pruned message list shape");
+    }
+    // Image blocks stripped
+    expect(tool.content.some((b) => b.type === "image")).toBe(false);
+    // Text preserved since it's under maxChars
+    expect(toolText(tool)).toContain("short result");
+    // Pruning note added as a separate text block
+    const allText = tool.content
+      .filter((b) => b.type === "text")
+      .map((b) => (b as { text: string }).text)
+      .join("\n");
+    expect(allText).toContain("image");
+    expect(allText).toContain("pruned");
   });
 
   it("soft-trims across block boundaries", () => {
