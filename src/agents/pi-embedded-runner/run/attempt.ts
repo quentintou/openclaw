@@ -637,6 +637,8 @@ export async function runEmbeddedAttempt(
         onAssistantMessageStart: params.onAssistantMessageStart,
         onAgentEvent: params.onAgentEvent,
         enforceFinalTag: params.enforceFinalTag,
+        config: params.config,
+        sessionKey: params.sessionKey ?? params.sessionId,
       });
 
       const {
