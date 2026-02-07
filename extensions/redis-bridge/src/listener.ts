@@ -71,12 +71,16 @@ export function createOutboundListener(
 
       if (!cliBinary) cliBinary = await resolveCliBinary();
 
-      await execFileAsync(cliBinary, [
+      const args = [
         "message", "send",
         "--channel", entry.channel,
         "--target", entry.to,
         "--message", entry.message,
-      ], { timeout: 30_000 });
+      ];
+      // Route via the correct bot account (e.g. "eff" for @effectual_agent_bot)
+      if (entry.accountId) args.push("--account", entry.accountId);
+
+      await execFileAsync(cliBinary, args, { timeout: 30_000 });
 
       // ACK after successful delivery
       await redis.xack(STREAM_OUTBOUND, config.consumerGroup, entryId);

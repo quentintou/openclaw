@@ -5,6 +5,7 @@ export type BridgeInboundEntry = {
   from: string;
   agent: string;
   channel: string;
+  accountId?: string; // Which bot/account received this message
   timestamp: string;
 };
 
@@ -14,6 +15,7 @@ export type BridgeOutboundEntry = {
   channel: string;
   to: string;
   message: string;
+  accountId?: string; // Telegram bot account (e.g. "eff", "default") — routes via the right bot
   timestamp?: string;
 };
 
