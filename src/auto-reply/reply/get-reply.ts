@@ -13,6 +13,7 @@ import type { MsgContext } from "../templating.js";
 import { SILENT_REPLY_TOKEN } from "../tokens.js";
 import { applyMediaUnderstanding } from "../../media-understanding/apply.js";
 import { applyLinkUnderstanding } from "../../link-understanding/apply.js";
+import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import type { GetReplyOptions, ReplyPayload } from "../types.js";
 import { resolveDefaultModel } from "./directive-handling.js";
 import { resolveReplyDirectives } from "./get-reply-directives.js";
@@ -253,6 +254,33 @@ export async function getReplyFromConfig(
     sessionKey,
     workspaceDir,
   });
+
+  // before_reply hook: allows plugins to bypass the LLM agent entirely
+  // (e.g., redis-bridge forwards to an external engine and returns the response)
+  const hookRunner = getGlobalHookRunner();
+  if (hookRunner?.hasHooks("before_reply")) {
+    const beforeReplyBody = ctx.CommandBody ?? ctx.RawBody ?? ctx.Body ?? "";
+    const beforeReplyResult = await hookRunner.runBeforeReply(
+      {
+        commandBody: beforeReplyBody,
+        agentId,
+        channel: (ctx.OriginatingChannel ?? ctx.Surface ?? ctx.Provider ?? "").toLowerCase(),
+        from: ctx.From ?? undefined,
+        accountId: ctx.AccountId ?? undefined,
+        sessionKey,
+      },
+      {
+        agentId,
+        sessionKey,
+        workspaceDir,
+        messageProvider: (ctx.Surface ?? ctx.Provider)?.toLowerCase(),
+      },
+    );
+    if (beforeReplyResult?.reply) {
+      typing.cleanup();
+      return beforeReplyResult.reply;
+    }
+  }
 
   return runPreparedReply({
     ctx,

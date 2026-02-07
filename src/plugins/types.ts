@@ -287,6 +287,7 @@ export type PluginDiagnostic = {
 // ============================================================================
 
 export type PluginHookName =
+  | "before_reply"
   | "before_agent_start"
   | "agent_end"
   | "before_compaction"
@@ -308,6 +309,21 @@ export type PluginHookAgentContext = {
   sessionKey?: string;
   workspaceDir?: string;
   messageProvider?: string;
+};
+
+// before_reply hook — fires before the LLM agent runs; allows plugins to
+// provide a complete reply and bypass the agent entirely.
+export type PluginHookBeforeReplyEvent = {
+  commandBody: string;
+  agentId: string;
+  channel?: string;
+  from?: string;
+  accountId?: string;
+  sessionKey?: string;
+};
+
+export type PluginHookBeforeReplyResult = {
+  reply?: ReplyPayload;
 };
 
 // before_agent_start hook
@@ -464,6 +480,10 @@ export type PluginHookGatewayStopEvent = {
 
 // Hook handler types mapped by hook name
 export type PluginHookHandlerMap = {
+  before_reply: (
+    event: PluginHookBeforeReplyEvent,
+    ctx: PluginHookAgentContext,
+  ) => Promise<PluginHookBeforeReplyResult | void> | PluginHookBeforeReplyResult | void;
   before_agent_start: (
     event: PluginHookBeforeAgentStartEvent,
     ctx: PluginHookAgentContext,

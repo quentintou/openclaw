@@ -14,6 +14,8 @@ import type {
   PluginHookBeforeAgentStartEvent,
   PluginHookBeforeAgentStartResult,
   PluginHookBeforeCompactionEvent,
+  PluginHookBeforeReplyEvent,
+  PluginHookBeforeReplyResult,
   PluginHookBeforeToolCallEvent,
   PluginHookBeforeToolCallResult,
   PluginHookGatewayContext,
@@ -38,6 +40,8 @@ import type {
 // Re-export types for consumers
 export type {
   PluginHookAgentContext,
+  PluginHookBeforeReplyEvent,
+  PluginHookBeforeReplyResult,
   PluginHookBeforeAgentStartEvent,
   PluginHookBeforeAgentStartResult,
   PluginHookAgentEndEvent,
@@ -165,6 +169,29 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
     }
 
     return result;
+  }
+
+  // =========================================================================
+  // Before Reply Hook (pre-agent)
+  // =========================================================================
+
+  /**
+   * Run before_reply hook.
+   * Allows plugins to provide a complete reply and bypass the LLM agent entirely.
+   * Runs sequentially; the first handler that returns a reply wins.
+   */
+  async function runBeforeReply(
+    event: PluginHookBeforeReplyEvent,
+    ctx: PluginHookAgentContext,
+  ): Promise<PluginHookBeforeReplyResult | undefined> {
+    return runModifyingHook<"before_reply", PluginHookBeforeReplyResult>(
+      "before_reply",
+      event,
+      ctx,
+      (acc, next) => ({
+        reply: next.reply ?? acc?.reply,
+      }),
+    );
   }
 
   // =========================================================================
@@ -432,6 +459,8 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
   }
 
   return {
+    // Pre-agent hook
+    runBeforeReply,
     // Agent hooks
     runBeforeAgentStart,
     runAgentEnd,
