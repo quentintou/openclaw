@@ -1,0 +1,14 @@
+{
+  "id": "redis-bridge",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "redisUrl": { "type": "string" },
+      "agents": { "type": "array", "items": { "type": "string" } },
+      "timeoutSeconds": { "type": "number" },
+      "consumerGroup": { "type": "string" },
+      "consumerName": { "type": "string" }
+    }
+  }
+}

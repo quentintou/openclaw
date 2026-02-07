@@ -1,0 +1,17 @@
+{
+  "name": "@clawdbot/redis-bridge",
+  "version": "2026.2.7",
+  "type": "module",
+  "description": "Clawdbot plugin to bridge messages to an external engine via Redis Streams",
+  "clawdbot": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "dependencies": {
+    "ioredis": "^5.6.1"
+  },
+  "peerDependencies": {
+    "clawdbot": ">=2026.1.24"
+  }
+}
