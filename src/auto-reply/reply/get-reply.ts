@@ -259,6 +259,8 @@ export async function getReplyFromConfig(
   // (e.g., redis-bridge forwards to an external engine and returns the response)
   const hookRunner = getGlobalHookRunner();
   if (hookRunner?.hasHooks("before_reply")) {
+    // Start typing indicator before the hook blocks (e.g., redis-bridge brpop)
+    typing.onReplyStart();
     const beforeReplyBody = ctx.CommandBody ?? ctx.RawBody ?? ctx.Body ?? "";
     const beforeReplyResult = await hookRunner.runBeforeReply(
       {
