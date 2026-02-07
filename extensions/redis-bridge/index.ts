@@ -66,6 +66,7 @@ const plugin = {
         "channel", event.channel ?? "unknown",
         "accountId", event.accountId ?? ctx.agentId,
         "timestamp", Date.now().toString(),
+        "sessionKey", event.sessionKey ?? `${event.channel ?? "unknown"}:${event.accountId ?? ctx.agentId}:${event.from ?? "anon"}`,
       );
 
       const result = await redis.brpop(responseKey, config.timeoutSeconds);
