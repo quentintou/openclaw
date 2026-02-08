@@ -57,4 +57,44 @@ describe("usage-format", () => {
 
     expect(total).toBeCloseTo(0.003);
   });
+
+  it("falls back to built-in rates for known OpenRouter models", () => {
+    const cost = resolveModelCostConfig({
+      provider: "openrouter",
+      model: "xai/grok-4-1-fast-reasoning",
+    });
+    expect(cost).toEqual({ input: 5, output: 15, cacheRead: 0, cacheWrite: 0 });
+  });
+
+  it("returns undefined for unknown models without config", () => {
+    const cost = resolveModelCostConfig({
+      provider: "openrouter",
+      model: "unknown/model",
+    });
+    expect(cost).toBeUndefined();
+  });
+
+  it("prefers config-defined rates over fallback", () => {
+    const config = {
+      models: {
+        providers: {
+          openrouter: {
+            models: [
+              {
+                id: "xai/grok-4-1-fast-reasoning",
+                cost: { input: 99, output: 99, cacheRead: 0, cacheWrite: 0 },
+              },
+            ],
+          },
+        },
+      },
+    } as ClawdbotConfig;
+
+    const cost = resolveModelCostConfig({
+      provider: "openrouter",
+      model: "xai/grok-4-1-fast-reasoning",
+      config,
+    });
+    expect(cost?.input).toBe(99);
+  });
 });

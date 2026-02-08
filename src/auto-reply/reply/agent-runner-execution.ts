@@ -6,6 +6,7 @@ import { getCliSessionId } from "../../agents/cli-session.js";
 import { runWithModelFallback } from "../../agents/model-fallback.js";
 import { isCliProvider } from "../../agents/model-selection.js";
 import { runEmbeddedPiAgent } from "../../agents/pi-embedded.js";
+import { isVercelProvider, runVercelExecutor } from "../../agents/vercel-executor.js";
 import {
   isCompactionFailureError,
   isContextOverflowError,
@@ -215,6 +216,21 @@ export async function runAgentTurnWithFallback(params: {
                 throw err;
               });
           }
+          // Route to Vercel AI SDK executor for non-native providers (OpenRouter, etc.)
+          if (isVercelProvider(provider)) {
+            return runVercelExecutor({
+              sessionId: params.followupRun.run.sessionId,
+              prompt: params.commandBody,
+              provider,
+              model,
+              timeoutMs: params.followupRun.run.timeoutMs,
+              runId,
+              abortSignal: params.opts?.abortSignal,
+              extraSystemPrompt: params.followupRun.run.extraSystemPrompt,
+              config: params.followupRun.run.config,
+            });
+          }
+
           const authProfileId =
             provider === params.followupRun.run.provider
               ? params.followupRun.run.authProfileId

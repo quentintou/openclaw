@@ -31,6 +31,22 @@ export function formatUsd(value?: number): string | undefined {
   return `$${value.toFixed(4)}`;
 }
 
+// Fallback cost rates (per 1M tokens) for well-known models when not configured.
+// These are approximate and may change; configure exact rates in clawdbot.json
+// under models.providers.<provider>.models[].cost for production use.
+const FALLBACK_MODEL_COSTS: Record<string, ModelCostConfig> = {
+  // OpenRouter models
+  "openrouter/xai/grok-4-1-fast-reasoning": { input: 5, output: 15, cacheRead: 0, cacheWrite: 0 },
+  "openrouter/moonshot/kimi-k2.5": { input: 1.5, output: 2, cacheRead: 0, cacheWrite: 0 },
+  "openrouter/deepseek/deepseek-r1": { input: 0.55, output: 2.19, cacheRead: 0, cacheWrite: 0 },
+  "openrouter/deepseek/deepseek-chat-v3-0324": {
+    input: 0.27,
+    output: 1.1,
+    cacheRead: 0,
+    cacheWrite: 0,
+  },
+};
+
 export function resolveModelCostConfig(params: {
   provider?: string;
   model?: string;
@@ -41,7 +57,9 @@ export function resolveModelCostConfig(params: {
   if (!provider || !model) return undefined;
   const providers = params.config?.models?.providers ?? {};
   const entry = providers[provider]?.models?.find((item) => item.id === model);
-  return entry?.cost;
+  if (entry?.cost) return entry.cost;
+  // Fall back to built-in rates for well-known models
+  return FALLBACK_MODEL_COSTS[`${provider}/${model}`];
 }
 
 const toNumber = (value: number | undefined): number =>

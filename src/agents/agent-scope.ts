@@ -20,6 +20,7 @@ type ResolvedAgentConfig = {
   workspace?: string;
   agentDir?: string;
   model?: AgentEntry["model"];
+  provider?: string;
   memorySearch?: AgentEntry["memorySearch"];
   humanDelay?: AgentEntry["humanDelay"];
   heartbeat?: AgentEntry["heartbeat"];
@@ -103,6 +104,7 @@ export function resolveAgentConfig(
       typeof entry.model === "string" || (entry.model && typeof entry.model === "object")
         ? entry.model
         : undefined,
+    provider: typeof entry.provider === "string" ? entry.provider : undefined,
     memorySearch: entry.memorySearch,
     humanDelay: entry.humanDelay,
     heartbeat: entry.heartbeat,
@@ -131,6 +133,10 @@ export function resolveAgentModelFallbacksOverride(
   // Important: treat an explicitly provided empty array as an override to disable global fallbacks.
   if (!Object.hasOwn(raw, "fallbacks")) return undefined;
   return Array.isArray(raw.fallbacks) ? raw.fallbacks : undefined;
+}
+
+export function resolveAgentProvider(cfg: ClawdbotConfig, agentId: string): string | undefined {
+  return resolveAgentConfig(cfg, agentId)?.provider?.trim() || undefined;
 }
 
 export function resolveAgentWorkspaceDir(cfg: ClawdbotConfig, agentId: string) {

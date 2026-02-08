@@ -24,6 +24,8 @@ export type AgentConfig = {
   workspace?: string;
   agentDir?: string;
   model?: AgentModelConfig;
+  /** Provider override for this agent (e.g. "openrouter", "vercel-anthropic", "vercel-google"). */
+  provider?: string;
   memorySearch?: MemorySearchConfig;
   /** Human-like delay between block replies for this agent. */
   humanDelay?: HumanDelayConfig;
