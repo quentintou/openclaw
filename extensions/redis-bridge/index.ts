@@ -7,7 +7,7 @@ import Redis from "ioredis";
 import { resolveConfig, isEngineAgent } from "./src/config.js";
 import { createRedisBridgeTool } from "./src/tools.js";
 import { createOutboundListener } from "./src/listener.js";
-import { STREAM_INBOUND, RESPONSE_KEY_PREFIX } from "./src/types.js";
+import { STREAM_INBOUND, RESPONSE_KEY_PREFIX, PROTOCOL_VERSION } from "./src/types.js";
 
 const plugin = {
   id: "redis-bridge",
@@ -67,6 +67,7 @@ const plugin = {
         "accountId", event.accountId ?? ctx.agentId,
         "timestamp", Date.now().toString(),
         "sessionKey", event.sessionKey ?? `${event.channel ?? "unknown"}:${event.accountId ?? ctx.agentId}:${event.from ?? "anon"}`,
+        "protocolVersion", PROTOCOL_VERSION,
       );
 
       const result = await redis.brpop(responseKey, config.timeoutSeconds);

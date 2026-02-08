@@ -38,6 +38,8 @@ export type RedisBridgeConfig = {
   consumerName: string;
 };
 
+export const PROTOCOL_VERSION = "1";
+
 export const STREAM_INBOUND = "bridge:inbound";
 export const STREAM_OUTBOUND = "bridge:outbound";
 export const RESPONSE_KEY_PREFIX = "bridge:response:";
