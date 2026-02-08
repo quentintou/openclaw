@@ -56,9 +56,7 @@ const plugin = {
         `(agent=${ctx.agentId}, correlationId=${correlationId})`,
       );
 
-      await redis.xadd(
-        STREAM_INBOUND,
-        "*",
+      const xaddArgs: string[] = [
         "correlationId", correlationId,
         "message", event.commandBody,
         "from", event.from ?? "proxy",
@@ -68,7 +66,11 @@ const plugin = {
         "timestamp", Date.now().toString(),
         "sessionKey", event.sessionKey ?? `${event.channel ?? "unknown"}:${event.accountId ?? ctx.agentId}:${event.from ?? "anon"}`,
         "protocolVersion", PROTOCOL_VERSION,
-      );
+      ];
+      if (event.senderName) xaddArgs.push("senderName", event.senderName);
+      if (event.senderUsername) xaddArgs.push("senderUsername", event.senderUsername);
+      if (event.senderId) xaddArgs.push("senderId", event.senderId);
+      await redis.xadd(STREAM_INBOUND, "*", ...xaddArgs);
 
       const result = await redis.brpop(responseKey, config.timeoutSeconds);
 

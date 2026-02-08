@@ -320,6 +320,9 @@ export type PluginHookBeforeReplyEvent = {
   from?: string;
   accountId?: string;
   sessionKey?: string;
+  senderName?: string;
+  senderUsername?: string;
+  senderId?: string;
 };
 
 export type PluginHookBeforeReplyResult = {

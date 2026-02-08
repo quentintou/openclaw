@@ -270,6 +270,9 @@ export async function getReplyFromConfig(
         from: ctx.From ?? undefined,
         accountId: ctx.AccountId ?? undefined,
         sessionKey,
+        senderName: ctx.SenderName ?? undefined,
+        senderUsername: ctx.SenderUsername ?? undefined,
+        senderId: ctx.SenderId ?? undefined,
       },
       {
         agentId,
