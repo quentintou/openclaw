@@ -4,16 +4,46 @@ import type { ClawdbotPluginApi } from "clawdbot/plugin-sdk";
 import { emptyPluginConfigSchema } from "clawdbot/plugin-sdk";
 import Redis from "ioredis";
 
+import { createCircuitBreaker } from "./src/circuit-breaker.js";
 import { resolveConfig, isEngineAgent } from "./src/config.js";
 import { createRedisBridgeTool } from "./src/tools.js";
 import { createOutboundListener } from "./src/listener.js";
 import { STREAM_INBOUND, RESPONSE_KEY_PREFIX, PROTOCOL_VERSION } from "./src/types.js";
 
-// Circuit-breaker state for engine availability
-let consecutiveFailures = 0;
-let circuitOpenedAt = 0;
-const CIRCUIT_THRESHOLD = 3;
-const CIRCUIT_COOLDOWN_MS = 30_000;
+// Max time to wait for Redis reconnection before fast-failing (ms)
+const REDIS_RECONNECT_WAIT_MS = 3_000;
+const REDIS_RECONNECT_POLL_MS = 200;
+// Max time to wait for Redis connections to be ready at startup (ms)
+const REDIS_STARTUP_TIMEOUT_MS = 10_000;
+
+/** Wait for an ioredis instance to emit "ready", with a timeout. */
+function waitForReady(client: Redis, timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (client.status === "ready") {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Redis connection not ready after ${timeoutMs}ms`));
+    }, timeoutMs);
+    function onReady() {
+      cleanup();
+      resolve();
+    }
+    function onError(err: Error) {
+      cleanup();
+      reject(err);
+    }
+    function cleanup() {
+      clearTimeout(timer);
+      client.off("ready", onReady);
+      client.off("error", onError);
+    }
+    client.once("ready", onReady);
+    client.once("error", onError);
+  });
+}
 
 const plugin = {
   id: "redis-bridge",
@@ -28,6 +58,9 @@ const plugin = {
       api.logger.warn("[redis-bridge] No agents configured; plugin inactive");
       return;
     }
+
+    // Circuit breaker — instance scoped to this register() call, not module-level
+    const breaker = createCircuitBreaker();
 
     const redis = new Redis(config.redisUrl, {
       maxRetriesPerRequest: null, // required for blocking commands (BRPOP/XREADGROUP)
@@ -100,20 +133,20 @@ const plugin = {
       if (!ctx.agentId || !isEngineAgent(ctx.agentId, config)) return;
 
       // Circuit breaker — fast-fail if Engine is repeatedly failing
-      if (consecutiveFailures >= CIRCUIT_THRESHOLD) {
-        const elapsed = Date.now() - circuitOpenedAt;
-        if (elapsed < CIRCUIT_COOLDOWN_MS) {
-          api.logger.warn(
-            `[redis-bridge] Circuit OPEN (${consecutiveFailures} failures), fast-failing`,
-          );
-          return {
-            reply: {
-              text: "Le moteur Effectual est temporairement indisponible. Reessaie dans quelques secondes.",
-              isError: true,
-            },
-          };
-        }
-        // Half-open: allow one request through to test recovery
+      if (breaker.isOpen()) {
+        api.logger.warn(
+          `[redis-bridge] Circuit OPEN (${breaker.consecutiveFailures} failures), fast-failing`,
+        );
+        return {
+          reply: {
+            text: "Le moteur Effectual est temporairement indisponible. Reessaie dans quelques secondes.",
+            isError: true,
+          },
+        };
+      }
+
+      if (breaker.isHalfOpen()) {
+        // Allow one request through to test recovery
         api.logger.info("[redis-bridge] Circuit half-open, testing Engine availability");
       }
 
@@ -121,18 +154,32 @@ const plugin = {
       const responseKey = `${RESPONSE_KEY_PREFIX}${correlationId}`;
 
       try {
-        // Fast-fail if Redis is disconnected — don't wait for a command timeout
+        // Wait briefly for Redis reconnection before fast-failing
         if (!redisReady || !redisBlockingReady) {
-          api.logger.error(
-            `[redis-bridge] before_reply: Redis not connected, cannot forward ` +
+          api.logger.info(
+            `[redis-bridge] before_reply: Redis not ready, waiting up to ${REDIS_RECONNECT_WAIT_MS}ms for reconnection ` +
             `(agent=${ctx.agentId}, correlationId=${correlationId})`,
           );
-          return {
-            reply: {
-              text: "Le moteur Effectual est temporairement indisponible (connexion Redis perdue). Reessaie dans quelques secondes.",
-              isError: true,
-            },
-          };
+          const deadline = Date.now() + REDIS_RECONNECT_WAIT_MS;
+          while ((!redisReady || !redisBlockingReady) && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, REDIS_RECONNECT_POLL_MS));
+          }
+          if (!redisReady || !redisBlockingReady) {
+            breaker.recordFailure();
+            api.logger.error(
+              `[redis-bridge] before_reply: Redis still not connected after ${REDIS_RECONNECT_WAIT_MS}ms, giving up ` +
+              `(agent=${ctx.agentId}, correlationId=${correlationId}, consecutiveFailures=${breaker.consecutiveFailures})`,
+            );
+            return {
+              reply: {
+                text: "Le moteur Effectual est temporairement indisponible (connexion Redis perdue). Reessaie dans quelques secondes.",
+                isError: true,
+              },
+            };
+          }
+          api.logger.info(
+            `[redis-bridge] before_reply: Redis reconnected, proceeding (agent=${ctx.agentId})`,
+          );
         }
 
         api.logger.info(
@@ -159,11 +206,10 @@ const plugin = {
         const result = await redisBlocking.brpop(responseKey, config.timeoutSeconds);
 
         if (!result) {
-          consecutiveFailures++;
-          if (consecutiveFailures >= CIRCUIT_THRESHOLD) circuitOpenedAt = Date.now();
+          breaker.recordFailure();
           api.logger.warn(
             `[redis-bridge] before_reply: engine timeout after ${config.timeoutSeconds}s ` +
-            `(correlationId=${correlationId}, consecutiveFailures=${consecutiveFailures})`,
+            `(correlationId=${correlationId}, consecutiveFailures=${breaker.consecutiveFailures})`,
           );
           return {
             reply: { text: "The engine did not respond in time. Please try again.", isError: true },
@@ -184,14 +230,13 @@ const plugin = {
         }
 
         // Success — reset circuit breaker
-        consecutiveFailures = 0;
+        breaker.recordSuccess();
         api.logger.info(
           `[redis-bridge] before_reply: response received (correlationId=${correlationId})`,
         );
         return { reply: { text: parsed.text ?? raw } };
       } catch (err) {
-        consecutiveFailures++;
-        if (consecutiveFailures >= CIRCUIT_THRESHOLD) circuitOpenedAt = Date.now();
+        breaker.recordFailure();
         // NEVER let an exception propagate — that causes silent fallback to native LLM
         const msg = err instanceof Error ? err.message : String(err);
         api.logger.error(
@@ -214,6 +259,13 @@ const plugin = {
       start: async (ctx) => {
         await redis.connect();
         await redisBlocking.connect();
+        // Wait for both connections to be ready before proceeding —
+        // prevents before_reply from firing before Redis is connected
+        await Promise.all([
+          waitForReady(redis, REDIS_STARTUP_TIMEOUT_MS),
+          waitForReady(redisBlocking, REDIS_STARTUP_TIMEOUT_MS),
+        ]);
+        ctx.logger.info("[redis-bridge] Both Redis connections ready");
         await listener.start(ctx);
       },
       stop: async (ctx) => {

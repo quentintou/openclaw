@@ -141,8 +141,9 @@ export function createOutboundListener(
         logger.error(
           `[redis-bridge] Listener error: ${err instanceof Error ? err.message : String(err)}`,
         );
-        // Back off before retrying
-        await new Promise((r) => setTimeout(r, 3000));
+        // Back off with jitter before retrying (avoid thundering herd)
+        const jitteredDelay = 3000 * (0.5 + Math.random() * 0.5);
+        await new Promise((r) => setTimeout(r, jitteredDelay));
       }
     }
   }
@@ -164,7 +165,8 @@ export function createOutboundListener(
           }`,
         );
         await new Promise((r) => setTimeout(r, backoff));
-        backoff = Math.min(backoff * 2, MAX_BACKOFF);
+        // Jittered exponential backoff to avoid thundering herd on reconnect
+        backoff = Math.min(backoff * 2, MAX_BACKOFF) * (0.5 + Math.random() * 0.5);
       }
     }
   }
