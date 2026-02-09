@@ -42,6 +42,8 @@ export function createOutboundListener(
     }
   }
 
+  const DEAD_LETTER_MAX_RETRIES = 5;
+
   async function processEntry(
     entryId: string,
     fields: string[],
@@ -58,6 +60,27 @@ export function createOutboundListener(
       logger.warn(`[redis-bridge] Skipping malformed outbound entry ${entryId}`);
       await redis.xack(STREAM_OUTBOUND, config.consumerGroup, entryId);
       return;
+    }
+
+    // Dead-letter check: if this entry has been retried too many times, ACK and drop it
+    try {
+      const pending = await redis.xpending(
+        STREAM_OUTBOUND, config.consumerGroup, entryId, entryId, 1,
+      ) as unknown[];
+      if (Array.isArray(pending) && pending.length > 0) {
+        const detail = pending[0] as unknown[];
+        // XPENDING detail format: [entryId, consumer, idleTime, deliveryCount]
+        const deliveryCount = Number(detail?.[3] ?? 0);
+        if (deliveryCount > DEAD_LETTER_MAX_RETRIES) {
+          logger.error(
+            `[redis-bridge] Dead-lettering outbound entry ${entryId} after ${deliveryCount} retries`,
+          );
+          await redis.xack(STREAM_OUTBOUND, config.consumerGroup, entryId);
+          return;
+        }
+      }
+    } catch {
+      // XPENDING check is best-effort; proceed with delivery
     }
 
     logger.info(
@@ -124,6 +147,28 @@ export function createOutboundListener(
     }
   }
 
+  async function resilientPollLoop(logger: ClawdbotPluginServiceContext["logger"]) {
+    let backoff = 1000;
+    const MAX_BACKOFF = 60_000;
+
+    while (running) {
+      try {
+        await pollLoop(logger);
+        // pollLoop exits normally when running = false
+        break;
+      } catch (err) {
+        if (!running) break;
+        logger.error(
+          `[redis-bridge] Poll loop crashed, restarting in ${backoff}ms: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        await new Promise((r) => setTimeout(r, backoff));
+        backoff = Math.min(backoff * 2, MAX_BACKOFF);
+      }
+    }
+  }
+
   return {
     async start(ctx: ClawdbotPluginServiceContext) {
       running = true;
@@ -133,10 +178,10 @@ export function createOutboundListener(
       // Resolve CLI binary at startup
       cliBinary = await resolveCliBinary();
       ctx.logger.info(`[redis-bridge] Using CLI binary: ${cliBinary}`);
-      // Fire-and-forget the poll loop
-      pollLoop(ctx.logger).catch((err) => {
+      // Fire-and-forget the resilient poll loop (auto-restarts on crash)
+      resilientPollLoop(ctx.logger).catch((err) => {
         ctx.logger.error(
-          `[redis-bridge] Poll loop crashed: ${err instanceof Error ? err.message : String(err)}`,
+          `[redis-bridge] Resilient poll loop exited unexpectedly: ${err instanceof Error ? err.message : String(err)}`,
         );
       });
     },
