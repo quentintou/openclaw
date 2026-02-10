@@ -5,6 +5,46 @@ import type { ClawdbotPluginServiceContext } from "clawdbot/plugin-sdk";
 import type { BridgeOutboundEntry, RedisBridgeConfig } from "./types.js";
 import { STREAM_OUTBOUND } from "./types.js";
 
+/** Messages longer than this are auto-published to the content server. */
+const PUBLISH_THRESHOLD = 3000;
+/** Max chars of body to include in the Telegram summary. */
+const SUMMARY_PREVIEW_LEN = 200;
+
+/**
+ * Split a message into chunks that fit within `maxLen` characters.
+ * Prefers splitting on paragraph boundaries (\n\n), then line breaks (\n),
+ * then hard-cuts at maxLen as a last resort.
+ */
+function splitMessage(text: string, maxLen: number): string[] {
+  if (text.length <= maxLen) return [text];
+
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > maxLen) {
+    // Try splitting on paragraph boundary
+    let splitIdx = remaining.lastIndexOf("\n\n", maxLen);
+    if (splitIdx > maxLen * 0.3) {
+      chunks.push(remaining.slice(0, splitIdx).trimEnd());
+      remaining = remaining.slice(splitIdx + 2).trimStart();
+      continue;
+    }
+    // Try splitting on line break
+    splitIdx = remaining.lastIndexOf("\n", maxLen);
+    if (splitIdx > maxLen * 0.3) {
+      chunks.push(remaining.slice(0, splitIdx).trimEnd());
+      remaining = remaining.slice(splitIdx + 1).trimStart();
+      continue;
+    }
+    // Hard cut at maxLen
+    chunks.push(remaining.slice(0, maxLen));
+    remaining = remaining.slice(maxLen);
+  }
+
+  if (remaining.length > 0) chunks.push(remaining);
+  return chunks;
+}
+
 /** Resolve the gateway CLI binary name (openclaw on VPS, clawdbot elsewhere). */
 async function resolveCliBinary(): Promise<string> {
   const { execFile } = await import("node:child_process");
@@ -15,6 +55,87 @@ async function resolveCliBinary(): Promise<string> {
     return "openclaw";
   } catch {
     return "clawdbot";
+  }
+}
+
+/**
+ * Extract a title from the message: first markdown heading, or first line,
+ * or first 60 chars — whatever fits best.
+ */
+function extractTitle(text: string): string {
+  // Try markdown heading
+  const headingMatch = text.match(/^#{1,3}\s+(.+)/m);
+  if (headingMatch) return headingMatch[1]!.trim().slice(0, 100);
+  // First non-empty line
+  const firstLine = text.split("\n").find((l) => l.trim().length > 0);
+  if (firstLine && firstLine.trim().length <= 100) return firstLine.trim();
+  // Truncate
+  return text.slice(0, 60).trim() + "...";
+}
+
+/**
+ * Build a short Telegram-friendly summary with a link to the full content.
+ */
+function buildTelegramSummary(title: string, body: string, url: string): string {
+  // Strip markdown headings and formatting for the preview
+  const plain = body
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/[*_~`]/g, "")
+    .trim();
+  const preview = plain.length > SUMMARY_PREVIEW_LEN
+    ? plain.slice(0, SUMMARY_PREVIEW_LEN).trim() + "..."
+    : plain;
+
+  return `${title}\n\n${preview}\n\nLire la suite : ${url}`;
+}
+
+/**
+ * Publish long content to the content server. Returns the public URL on success,
+ * or null if publishing fails or is not configured.
+ */
+async function tryPublish(
+  message: string,
+  config: RedisBridgeConfig,
+  logger: ClawdbotPluginServiceContext["logger"],
+): Promise<{ title: string; url: string } | null> {
+  if (!config.contentPublisherUrl || !config.contentPublisherToken) return null;
+
+  const title = extractTitle(message);
+
+  try {
+    const resp = await fetch(`${config.contentPublisherUrl}/api/publish`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${config.contentPublisherToken}`,
+      },
+      body: JSON.stringify({
+        title,
+        body: message,
+        type: "markdown",
+        summary: message.slice(0, 200),
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!resp.ok) {
+      logger.warn(`[redis-bridge] Content publish failed: HTTP ${resp.status}`);
+      return null;
+    }
+
+    const data = (await resp.json()) as { id: string; url: string };
+    // Use the public URL if configured, otherwise use the URL from the server
+    const publicUrl = config.contentPublisherPublicUrl
+      ? `${config.contentPublisherPublicUrl}/p/${data.id}`
+      : data.url;
+
+    logger.info(`[redis-bridge] Published content: ${publicUrl}`);
+    return { title, url: publicUrl };
+  } catch (err) {
+    logger.warn(
+      `[redis-bridge] Content publish error: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
   }
 }
 
@@ -94,18 +215,35 @@ export function createOutboundListener(
 
       if (!cliBinary) cliBinary = await resolveCliBinary();
 
-      const args = [
-        "message", "send",
-        "--channel", entry.channel,
-        "--target", entry.to,
-        "--message", entry.message,
-      ];
-      // Route via the correct bot account (e.g. "eff" for @effectual_agent_bot)
-      if (entry.accountId) args.push("--account", entry.accountId);
+      let messageToSend = entry.message;
 
-      await execFileAsync(cliBinary, args, { timeout: 30_000 });
+      // Auto-publish long messages to the content server
+      if (messageToSend.length > PUBLISH_THRESHOLD) {
+        const published = await tryPublish(messageToSend, config, logger);
+        if (published) {
+          messageToSend = buildTelegramSummary(published.title, messageToSend, published.url);
+        }
+        // If publish failed, fall through to chunked delivery
+      }
 
-      // ACK after successful delivery
+      // Split long messages to respect Telegram's 4096-char limit.
+      const MAX_MSG_LEN = 4000; // leave margin for Telegram's 4096 limit
+      const chunks = splitMessage(messageToSend, MAX_MSG_LEN);
+
+      for (const chunk of chunks) {
+        const args = [
+          "message", "send",
+          "--channel", entry.channel,
+          "--target", entry.to,
+          "--message", chunk,
+        ];
+        // Route via the correct bot account (e.g. "eff" for @effectual_agent_bot)
+        if (entry.accountId) args.push("--account", entry.accountId);
+
+        await execFileAsync(cliBinary, args, { timeout: 30_000 });
+      }
+
+      // ACK after successful delivery of all chunks
       await redis.xack(STREAM_OUTBOUND, config.consumerGroup, entryId);
     } catch (err) {
       logger.error(

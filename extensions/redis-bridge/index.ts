@@ -6,6 +6,7 @@ import Redis from "ioredis";
 
 import { createCircuitBreaker } from "./src/circuit-breaker.js";
 import { resolveConfig, isEngineAgent } from "./src/config.js";
+import { createRateLimiter } from "./src/rate-limiter.js";
 import { createRedisBridgeTool } from "./src/tools.js";
 import { createOutboundListener } from "./src/listener.js";
 import { STREAM_INBOUND, RESPONSE_KEY_PREFIX, PROTOCOL_VERSION } from "./src/types.js";
@@ -62,6 +63,14 @@ const plugin = {
     // Circuit breaker — instance scoped to this register() call, not module-level
     const breaker = createCircuitBreaker();
 
+    // Rate limiter — prevents runaway API costs from bugs, loops, or misconfigured heartbeats
+    const rateLimiter = createRateLimiter({
+      maxRequestsPerHour: Number(process.env.RATE_LIMIT_GLOBAL_PER_HOUR) || 60,
+      maxRequestsPerAgentPerHour: Number(process.env.RATE_LIMIT_AGENT_PER_HOUR) || 20,
+      alertChatId: process.env.RATE_LIMIT_ALERT_CHAT_ID ?? "",
+      alertCooldownSeconds: Number(process.env.RATE_LIMIT_ALERT_COOLDOWN) || 300,
+    });
+
     const redis = new Redis(config.redisUrl, {
       maxRetriesPerRequest: null, // required for blocking commands (BRPOP/XREADGROUP)
       lazyConnect: true,
@@ -73,21 +82,96 @@ const plugin = {
       lazyConnect: true,
     });
 
-    let redisReady = false;
-    let redisBlockingReady = false;
+    // Check Redis readiness by querying ioredis status directly.
+    // This avoids desync between boolean flags and actual connection state
+    // (e.g. when "close"/"end" events are missed or connection silently dies).
+    function isRedisReady() {
+      return redis.status === "ready" && redisBlocking.status === "ready";
+    }
+
+    // --- Auto-repair: force reconnect when connections die silently ---
+    // ioredis with lazyConnect + maxRetriesPerRequest:null can end up in
+    // "end"/"close" state without auto-reconnecting. This guard detects
+    // dead connections and forces a reconnect.
+    let reconnectInFlight = false;
+
+    async function ensureConnected(): Promise<boolean> {
+      if (isRedisReady()) return true;
+
+      // Avoid concurrent reconnect attempts
+      if (reconnectInFlight) {
+        // Another call is already reconnecting — just wait for it
+        const deadline = Date.now() + REDIS_RECONNECT_WAIT_MS;
+        while (!isRedisReady() && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, REDIS_RECONNECT_POLL_MS));
+        }
+        return isRedisReady();
+      }
+
+      reconnectInFlight = true;
+      try {
+        api.logger.warn(
+          `[redis-bridge] Auto-repair: connections not ready (status=${redis.status}/${redisBlocking.status}), forcing reconnect`,
+        );
+
+        // Force reconnect on each client that isn't ready.
+        // ioredis .connect() is safe to call — it no-ops if already connecting/ready.
+        const reconnects: Promise<void>[] = [];
+        if (redis.status !== "ready" && redis.status !== "connecting" && redis.status !== "reconnecting") {
+          reconnects.push(
+            redis.connect().catch((err) => {
+              api.logger.error(`[redis-bridge] Auto-repair: redis.connect() failed: ${err instanceof Error ? err.message : String(err)}`);
+            }),
+          );
+        }
+        if (redisBlocking.status !== "ready" && redisBlocking.status !== "connecting" && redisBlocking.status !== "reconnecting") {
+          reconnects.push(
+            redisBlocking.connect().catch((err) => {
+              api.logger.error(`[redis-bridge] Auto-repair: redisBlocking.connect() failed: ${err instanceof Error ? err.message : String(err)}`);
+            }),
+          );
+        }
+
+        if (reconnects.length > 0) {
+          await Promise.all(reconnects);
+        }
+
+        // Wait for both to become ready (up to REDIS_RECONNECT_WAIT_MS)
+        const deadline = Date.now() + REDIS_RECONNECT_WAIT_MS;
+        while (!isRedisReady() && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, REDIS_RECONNECT_POLL_MS));
+        }
+
+        if (isRedisReady()) {
+          api.logger.info(
+            `[redis-bridge] Auto-repair: reconnected successfully (status=${redis.status}/${redisBlocking.status})`,
+          );
+          return true;
+        }
+
+        api.logger.error(
+          `[redis-bridge] Auto-repair: still not ready after ${REDIS_RECONNECT_WAIT_MS}ms (status=${redis.status}/${redisBlocking.status})`,
+        );
+        return false;
+      } finally {
+        reconnectInFlight = false;
+      }
+    }
 
     redis.on("error", (err) => {
       api.logger.error(`[redis-bridge] Redis error: ${err.message}`);
     });
 
     redis.on("ready", () => {
-      redisReady = true;
       api.logger.info("[redis-bridge] Redis connection ready");
     });
 
     redis.on("close", () => {
-      redisReady = false;
       api.logger.warn("[redis-bridge] Redis connection closed");
+    });
+
+    redis.on("end", () => {
+      api.logger.warn("[redis-bridge] Redis connection ended");
     });
 
     redis.on("reconnecting", () => {
@@ -99,13 +183,15 @@ const plugin = {
     });
 
     redisBlocking.on("ready", () => {
-      redisBlockingReady = true;
       api.logger.info("[redis-bridge] Redis (blocking) connection ready");
     });
 
     redisBlocking.on("close", () => {
-      redisBlockingReady = false;
       api.logger.warn("[redis-bridge] Redis (blocking) connection closed");
+    });
+
+    redisBlocking.on("end", () => {
+      api.logger.warn("[redis-bridge] Redis (blocking) connection ended");
     });
 
     redisBlocking.on("reconnecting", () => {
@@ -132,6 +218,23 @@ const plugin = {
     api.on("before_reply", async (event, ctx) => {
       if (!ctx.agentId || !isEngineAgent(ctx.agentId, config)) return;
 
+      // Skip gateway heartbeats — these are designed for the local gateway LLM,
+      // not the external Engine. Forwarding them causes ~$100+/day in wasted API calls.
+      // Return HEARTBEAT_OK so the gateway's heartbeat system treats it as idle.
+      const body = event.commandBody ?? "";
+      if (body.includes("HEARTBEAT_OK") || body.includes("Read HEARTBEAT.md")) {
+        return { reply: { text: "HEARTBEAT_OK" } };
+      }
+
+      // Rate limiter — prevent runaway costs
+      const rateLimitMsg = rateLimiter.check(ctx.agentId);
+      if (rateLimitMsg) {
+        api.logger.warn(`[redis-bridge] Rate limited: ${ctx.agentId} (${JSON.stringify(rateLimiter.stats())})`);
+        rateLimiter.sendAlert(rateLimitMsg, ctx.agentId, null, { info: api.logger.info, warn: api.logger.warn, error: api.logger.error } as any).catch(() => {});
+        return { reply: { text: rateLimitMsg, isError: true } };
+      }
+      rateLimiter.record(ctx.agentId);
+
       // Circuit breaker — fast-fail if Engine is repeatedly failing
       if (breaker.isOpen()) {
         api.logger.warn(
@@ -154,21 +257,14 @@ const plugin = {
       const responseKey = `${RESPONSE_KEY_PREFIX}${correlationId}`;
 
       try {
-        // Wait briefly for Redis reconnection before fast-failing
-        if (!redisReady || !redisBlockingReady) {
-          api.logger.info(
-            `[redis-bridge] before_reply: Redis not ready, waiting up to ${REDIS_RECONNECT_WAIT_MS}ms for reconnection ` +
-            `(agent=${ctx.agentId}, correlationId=${correlationId})`,
-          );
-          const deadline = Date.now() + REDIS_RECONNECT_WAIT_MS;
-          while ((!redisReady || !redisBlockingReady) && Date.now() < deadline) {
-            await new Promise((r) => setTimeout(r, REDIS_RECONNECT_POLL_MS));
-          }
-          if (!redisReady || !redisBlockingReady) {
+        // Auto-repair: if Redis is down, actively reconnect instead of just waiting
+        if (!isRedisReady()) {
+          const recovered = await ensureConnected();
+          if (!recovered) {
             breaker.recordFailure();
             api.logger.error(
-              `[redis-bridge] before_reply: Redis still not connected after ${REDIS_RECONNECT_WAIT_MS}ms, giving up ` +
-              `(agent=${ctx.agentId}, correlationId=${correlationId}, consecutiveFailures=${breaker.consecutiveFailures})`,
+              `[redis-bridge] before_reply: Redis auto-repair failed ` +
+              `(agent=${ctx.agentId}, correlationId=${correlationId}, status=${redis.status}/${redisBlocking.status}, consecutiveFailures=${breaker.consecutiveFailures})`,
             );
             return {
               reply: {
@@ -178,7 +274,7 @@ const plugin = {
             };
           }
           api.logger.info(
-            `[redis-bridge] before_reply: Redis reconnected, proceeding (agent=${ctx.agentId})`,
+            `[redis-bridge] before_reply: Redis auto-repaired, proceeding (agent=${ctx.agentId})`,
           );
         }
 
@@ -201,6 +297,9 @@ const plugin = {
         if (event.senderName) xaddArgs.push("senderName", event.senderName);
         if (event.senderUsername) xaddArgs.push("senderUsername", event.senderUsername);
         if (event.senderId) xaddArgs.push("senderId", event.senderId);
+        if ((event as Record<string, unknown>).transcript) {
+          xaddArgs.push("transcript", String((event as Record<string, unknown>).transcript));
+        }
         await redis.xadd(STREAM_INBOUND, "*", ...xaddArgs);
 
         const result = await redisBlocking.brpop(responseKey, config.timeoutSeconds);

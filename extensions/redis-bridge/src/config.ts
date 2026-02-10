@@ -37,7 +37,25 @@ export function resolveConfig(
     (typeof pluginConfig?.consumerName === "string" && pluginConfig.consumerName.trim()) ||
     DEFAULT_CONSUMER_NAME;
 
-  return { agents, redisUrl, timeoutSeconds, consumerGroup, consumerName };
+  const contentPublisherUrl =
+    (typeof process.env.CONTENT_PUBLISHER_URL === "string" && process.env.CONTENT_PUBLISHER_URL.trim()) ||
+    (typeof pluginConfig?.contentPublisherUrl === "string" && pluginConfig.contentPublisherUrl) ||
+    "";
+
+  const contentPublisherToken =
+    (typeof process.env.CONTENT_PUBLISHER_TOKEN === "string" && process.env.CONTENT_PUBLISHER_TOKEN.trim()) ||
+    (typeof pluginConfig?.contentPublisherToken === "string" && pluginConfig.contentPublisherToken) ||
+    "";
+
+  const contentPublisherPublicUrl =
+    (typeof process.env.CONTENT_PUBLISHER_PUBLIC_URL === "string" && process.env.CONTENT_PUBLISHER_PUBLIC_URL.trim()) ||
+    (typeof pluginConfig?.contentPublisherPublicUrl === "string" && pluginConfig.contentPublisherPublicUrl) ||
+    "";
+
+  return {
+    agents, redisUrl, timeoutSeconds, consumerGroup, consumerName,
+    contentPublisherUrl, contentPublisherToken, contentPublisherPublicUrl,
+  };
 }
 
 /** Check whether a given agent ID is routed through the engine. */

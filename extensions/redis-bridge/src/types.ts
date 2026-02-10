@@ -36,6 +36,12 @@ export type RedisBridgeConfig = {
   consumerGroup: string;
   /** Consumer name within the group. */
   consumerName: string;
+  /** Content publisher base URL (e.g. http://localhost:3461). Empty = disabled. */
+  contentPublisherUrl: string;
+  /** Bearer token for content publisher API. */
+  contentPublisherToken: string;
+  /** Public base URL for published content links. */
+  contentPublisherPublicUrl: string;
 };
 
 export const PROTOCOL_VERSION = "1";
